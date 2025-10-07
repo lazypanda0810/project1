@@ -1,0 +1,282 @@
+// Main entry point for the Premium Watch E-commerce Backend
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const compression = require('compression');
+const mongoSanitize = require('express-mongo-sanitize');
+const xss = require('xss-clean');
+const hpp = require('hpp');
+const session = require('express-session');
+require('dotenv').config();
+
+// Validate critical environment variables. Allow using an in-memory MongoDB
+// when USE_IN_MEMORY_DB=true (for quick local tests without a running DB).
+const requiredEnvVars = ['SESSION_SECRET'];
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+
+// If MONGODB_URI is not provided and in-memory DB is not enabled, treat it as missing
+const useInMemory = (v) => v && ['1', 'true', 'True', 'TRUE'].includes(v);
+if (!process.env.MONGODB_URI && !useInMemory(process.env.USE_IN_MEMORY_DB)) {
+  missingEnvVars.push('MONGODB_URI');
+}
+
+if (missingEnvVars.length > 0) {
+  console.error('❌ Missing required environment variables:');
+  missingEnvVars.forEach(envVar => console.error(`   - ${envVar}`));
+  console.error('💡 Please check your .env file (or set USE_IN_MEMORY_DB=true for a local in-memory DB)');
+  process.exit(1);
+}
+
+// Import passport configuration
+const { passport } = require('../middleware/auth');
+
+// Import database connection
+const connectDB = require('./config/database');
+
+// Import initialization functions
+const { createDefaultAdmin } = require('./scripts/seedData');
+
+// Import routes
+const authRoutes = require('./routes/authRoutes');
+const googleAuthRoutes = require('../routes/auth');
+const paymentRoutes = require('../routes/payment');
+const webhookRoutes = require('../routes/webhook');
+const productRoutes = require('./routes/productRoutes');
+const cartRoutes = require('./routes/cartRoutes');
+const orderRoutes = require('./routes/orderRoutes');
+const adminRoutes = require('./routes/adminRoutes');
+const devRoutes = require('./routes/devRoutes');
+
+// Import middleware
+const { errorHandler, notFound } = require('./middleware/errorHandler');
+const { generalLimiter, authLimiter, apiLimiter, checkoutLimiter } = require('./middleware/rateLimiter');
+const { handleMulterError } = require('./middleware/upload');
+
+// Initialize Express app
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Connect to database and initialize
+const initializeApp = async () => {
+  try {
+    await connectDB();
+    console.log('🔧 Initializing application...');
+    
+    // Create default admin user if it doesn't exist
+    await createDefaultAdmin();
+    console.log('✅ Application initialization complete');
+  } catch (error) {
+    console.error('❌ Application initialization failed:', error);
+    process.exit(1);
+  }
+};
+
+initializeApp();
+
+// Trust proxy (for rate limiting behind reverse proxy)
+app.set('trust proxy', 1);
+
+// Security middleware
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
+// CORS configuration
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || 'http://localhost:8080',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
+// Compression middleware
+app.use(compression());
+
+// Session middleware (must be before passport)
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'fallback-secret-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production', // Only send over HTTPS in production
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
+
+// Passport middleware
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Data sanitization against NoSQL query injection
+app.use(mongoSanitize());
+
+// Data sanitization against XSS
+app.use(xss());
+
+// Prevent parameter pollution
+app.use(hpp({
+  whitelist: ['sort', 'page', 'limit', 'brand', 'category', 'color', 'price']
+}));
+
+// Logging middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+} else {
+  app.use(morgan('combined'));
+}
+
+// Rate limiting
+app.use('/api/', generalLimiter);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/signup', authLimiter);
+app.use('/api/checkout', checkoutLimiter);
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
+    version: '1.0.0'
+  });
+});
+
+// API status endpoint
+app.get('/api/status', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Premium Watch E-commerce API',
+    version: '1.0.0',
+    status: 'running',
+    features: [
+      'JWT Authentication',
+      'Role-based Access Control',
+      'Product Management',
+      'Shopping Cart',
+      'Order Processing',
+      'Payment Integration Ready',
+      'Shipping Partners Integration',
+      'Advanced Search & Filtering',
+      'Inventory Management',
+      'GST Calculation'
+    ],
+    endpoints: {
+      auth: '/api/auth',
+      products: '/api/products',
+      cart: '/api/cart',
+      orders: '/api/orders',
+      checkout: '/api/checkout'
+    }
+  });
+});
+
+// Webhook routes (before body parsing middleware)
+app.use('/webhook', webhookRoutes);
+
+// API Routes
+app.use('/api/auth', authRoutes);
+app.use('/auth', googleAuthRoutes); // Google OAuth routes
+app.use('/api/payment', paymentRoutes); // Payment routes
+app.use('/api/products', productRoutes);
+app.use('/api/cart', cartRoutes);
+app.use('/api', orderRoutes); // checkout and orders
+app.use('/api/admin', adminRoutes); // Admin management routes
+
+// Development routes (only available in development mode)
+if (process.env.NODE_ENV === 'development') {
+  app.use('/api/dev', devRoutes);
+}
+
+// Admin routes (for categories via products router)
+// Additional admin-specific routes can be added here
+
+// File upload error handling
+app.use(handleMulterError);
+
+// Error handling middleware (must be last)
+app.use(notFound);
+app.use(errorHandler);
+
+// Graceful shutdown
+const gracefulShutdown = async (signal) => {
+  console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
+  
+  server.close(async () => {
+    console.log('🔒 HTTP server closed');
+    
+    // Close database connection
+    try {
+      await require('mongoose').connection.close();
+      console.log('🔌 Database connection closed');
+      process.exit(0);
+    } catch (error) {
+      console.error('❌ Error closing database connection:', error);
+      process.exit(1);
+    }
+  });
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('⚠️  Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+};
+
+// Start server
+const server = app.listen(PORT, () => {
+  console.log(`
+╭─────────────────────────────────────────────────────────╮
+│                                                         │
+│   🏪 Premium Watch E-commerce Backend API              │
+│                                                         │
+│   🚀 Server running on port ${PORT}                         │
+│   📍 Environment: ${process.env.NODE_ENV || 'development'}                   │
+│   🌐 CORS Origin: ${process.env.CORS_ORIGIN || 'http://localhost:3000'}     │
+│   📊 Health Check: http://localhost:${PORT}/health          │
+│   📋 API Status: http://localhost:${PORT}/api/status        │
+│                                                         │
+│   📚 API Endpoints:                                     │
+│   🔐 Auth: /api/auth                                    │
+│   ⌚ Products: /api/products                            │
+│   🛒 Cart: /api/cart                                    │
+│   📦 Orders: /api/orders                                │
+│   💳 Checkout: /api/checkout                            │
+│                                                         │
+│   🛡️  Security Features Enabled:                       │
+│   ✅ Helmet (Security headers)                          │
+│   ✅ CORS (Cross-origin protection)                     │
+│   ✅ Rate Limiting                                      │
+│   ✅ Data Sanitization                                  │
+│   ✅ XSS Protection                                     │
+│   ✅ Parameter Pollution Prevention                     │
+│                                                         │
+│   🔧 Ready for 5,000+ concurrent users                 │
+│                                                         │
+╰─────────────────────────────────────────────────────────╯
+  `);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err, promise) => {
+  console.error('❌ Unhandled Promise Rejection:', err.message);
+  gracefulShutdown('UNHANDLED_REJECTION');
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err.message);
+  gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+// Handle SIGTERM and SIGINT
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+module.exports = app;

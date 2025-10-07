@@ -1,0 +1,43 @@
+name: CI - Build & Smoke Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build backend image
+        run: |
+          docker build -t watch-backend:ci ./backend
+
+      - name: Build frontend image
+        run: |
+          docker build -t watch-frontend:ci ./frontend
+
+      - name: Start services (compose)
+        run: |
+          docker compose up -d --build
+
+      - name: Wait for backend
+        run: |
+          for i in {1..20}; do
+            if curl -sSf http://localhost:5000/health; then echo ok && break; fi
+            sleep 3
+          done
+
+      - name: Smoke test /api/status
+        run: |
+          curl -f http://localhost:5000/api/status
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes
