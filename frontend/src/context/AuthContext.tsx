@@ -50,8 +50,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
       if (response.ok) {
         const data = await response.json();
-        setUser(data.user);
-        setIsDoubleChecked(data.doubleChecked);
+        // Backend returns { success: true, data: { user } }
+        // Older clients or other endpoints might return { user, doubleChecked }
+        const user = data?.data?.user ?? data?.user ?? null;
+        const doubleChecked = data?.data?.doubleChecked ?? data?.doubleChecked ?? true;
+        setUser(user);
+        setIsDoubleChecked(!!doubleChecked);
       } else {
         setUser(null);
         setIsDoubleChecked(false);

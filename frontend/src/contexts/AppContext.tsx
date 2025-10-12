@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
-import { Product } from '@/data/products';
+import { Product, products as sampleProducts } from '@/data/products';
 import axios from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
@@ -45,8 +45,9 @@ const initialState: AppState = {
   user: null,
   cart: [],
   wishlist: [],
-  products: [],
-  loading: true,
+  // Preload a small sample dataset so UI shows listings even if API is down
+  products: sampleProducts,
+  loading: false,
   error: null,
 };
 
@@ -241,9 +242,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         dispatch({ type: 'SET_ERROR', payload: null }); // Clear error since we have fallback data
       } finally {
-        if (!state.products || state.products.length === 0) {
-          dispatch({ type: 'SET_LOADING', payload: false });
-        }
+        // Always clear loading after attempting to fetch products
+        dispatch({ type: 'SET_LOADING', payload: false });
       }
     },
 

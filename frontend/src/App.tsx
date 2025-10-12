@@ -38,12 +38,8 @@ const App = () => (
               <Route path="/secure-login" element={<Login />} />
               <Route path="/verify-email" element={<VerifyEmail />} />
               
-              {/* Protected routes */}
-              <Route path="/" element={
-                <ProtectedRoute requireDoubleCheck={false}>
-                  <Index />
-                </ProtectedRoute>
-              } />
+              {/* Public home route (show Index by default) */}
+              <Route path="/" element={<Index />} />
               <Route path="/products" element={<ProductListingPage />} />
               <Route path="/products/:id" element={<ProductDetailPage />} />
               <Route path="/cart" element={

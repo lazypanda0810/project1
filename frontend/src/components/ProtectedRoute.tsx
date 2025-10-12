@@ -18,7 +18,10 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   const { state } = useApp();
   const location = useLocation();
 
-  if (state.loading) {
+  // If auth is still being checked, show the authenticating UI and do not redirect yet.
+  const authChecked = (state as any).isDoubleChecked ?? (state as any).isAuthChecked ?? !state.loading;
+
+  if (state.loading || !authChecked) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <Card className="w-full max-w-md">
@@ -35,6 +38,7 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
     );
   }
 
+  // Only redirect to login after the auth check has completed and we confirmed there's no user
   if (!state.user) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
