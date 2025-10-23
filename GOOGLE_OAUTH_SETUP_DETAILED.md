@@ -249,3 +249,184 @@ Invoke-WebRequest -Uri 'http://127.0.0.1:5000/auth/config' -UseBasicParsing | Se
 ---
 
 Saved as `GOOGLE_OAUTH_SETUP_DETAILED.md` in repo root.
+
+---
+
+## 13) Repo-specific integration (exact snippets & where to drop env vars)
+
+This repository already contains the OAuth wiring and a double-check email flow. Below are exact snippets and where to place environment variables and how the OAuth flow links into the database (user creation / lookup).
+
+1) Where to put env variables
+
+- Backend `.env` (repo root `backend` folder):
+
+```
+GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+GOOGLE_CALLBACK_URL=http://localhost:5000/auth/google/callback
+SESSION_SECRET=your-session-secret
+EMAIL_USER=your-smtp-user@example.com
+EMAIL_PASS=your-smtp-password-or-app-password
+VERIFICATION_CODE_EXPIRES=600000
+```
+
+Place this file at `d:\newweb\watchwebsite-main\backend\.env` (do not commit).
+
+2) Relevant backend files (already present)
+
+- `backend/routes/auth.js` — handles `/auth/google` and `/auth/google/callback`, sends verification email and exposes `/auth/config`.
+
+Key snippet from `routes/auth.js` (initiate + callback):
+
+```javascript
+// Google OAuth initiate
+router.get('/google', (req, res, next) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return res.redirect('/secure-login?error=oauth_not_configured');
+  }
+  passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
+});
+
+// Google OAuth callback
+router.get('/google/callback', 
+  passport.authenticate('google', { failureRedirect: '/login?error=oauth_failed' }),
+  async (req, res) => {
+    try {
+      // Generate verification code
+      const code = generateVerificationCode();
+      req.session.doubleCheckCode = code;
+      req.session.doubleChecked = false;
+      req.session.codeGeneratedAt = Date.now();
+      
+      // Send verification email
+      const email = req.user.email;
+      const emailResult = await sendVerificationEmail(email, code);
+      
+      if (!emailResult.success) {
+        return res.redirect('/login?error=email_failed');
+      }
+      
+      // Redirect to verification page
+      res.redirect('/verify-email');
+    } catch (error) {
+      console.error('OAuth callback error:', error);
+      res.redirect('/login?error=server_error');
+    }
+  }
+);
+```
+
+3) Passport strategy and sample app entry (existing `google-oauth-double-check.js`)
+
+The repo includes an example server entry `backend/google-oauth-double-check.js` which demonstrates Passport usage and email sending via nodemailer. The strategy is configured like this:
+
+```javascript
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: '/auth/google/callback',
+}, (accessToken, refreshToken, profile, done) => {
+  // Only basic profile info for now
+  return done(null, profile);
+}));
+```
+
+Notes:
+- In the repository, `passport` is wired to return the Google `profile` as the `req.user`. The `routes/auth.js` expects `req.user.email` to exist and uses the `sendVerificationEmail` helper.
+- If you want to persist/login users in the app DB (recommended), replace the simple `profile` return with a `findOrCreate` that upserts into the `User` model (example below).
+
+4) User model (how to store Google profile)
+
+The repository's Mongoose model is at `backend/src/models/User.js`. The schema does not contain `googleId` by default in the main fields (the repo uses a standard user schema). To link OAuth users, add `googleId` and optional `avatar` fields, then upsert a user when OAuth returns:
+
+Example modifications (schema snippet):
+
+```javascript
+  // add to userSchema
+  googleId: {
+    type: String,
+    index: true,
+    sparse: true
+  },
+  avatar: String,
+```
+
+Upsert logic (where to place it: in the Passport callback handler):
+
+```javascript
+// pseudocode inside the passport strategy callback
+const profileEmail = profile.emails && profile.emails[0] && profile.emails[0].value;
+let user = await User.findOne({ email: profileEmail });
+if (!user) {
+  user = new User({
+    firstName: profile.name?.givenName || 'Google',
+    lastName: profile.name?.familyName || 'User',
+    email: profileEmail,
+    password: crypto.randomBytes(16).toString('hex'), // random password since OAuth
+    googleId: profile.id,
+    avatar: profile.photos && profile.photos[0] && profile.photos[0].value,
+    isVerified: true
+  });
+  await user.save();
+} else if (!user.googleId) {
+  user.googleId = profile.id;
+  user.avatar = user.avatar || (profile.photos && profile.photos[0] && profile.photos[0].value);
+  await user.save();
+}
+return done(null, user);
+```
+
+This links the authenticated Google user to the application's DB user. The repo's `routes/auth.js` and `ensureAuthenticated` middleware expect `req.user` to represent a DB-backed user object (with `.email` etc.). If your current Passport configuration returns the raw `profile`, replace it with the DB `user` as shown above.
+
+5) Where the code seeds and expects users
+
+- The seed script `backend/src/scripts/seedData.js` creates an admin user and calls `await connectDB()` using `process.env.MONGODB_URI`.
+- To link OAuth users to seeded data, ensure `MONGODB_URI` is configured and run `npm run seed` (see `DB_INSTALL_GUIDE.md`). OAuth user upsert will then write to the same DB.
+
+6) Example: full Passport callback integrating DB + double-check
+
+```javascript
+// inside new GoogleStrategy callback
+async (accessToken, refreshToken, profile, done) => {
+  try {
+    const email = profile.emails && profile.emails[0] && profile.emails[0].value;
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = new User({
+        firstName: profile.name?.givenName || 'Google',
+        lastName: profile.name?.familyName || 'User',
+        email,
+        password: crypto.randomBytes(16).toString('hex'),
+        googleId: profile.id,
+        avatar: profile.photos?.[0]?.value,
+        isVerified: true
+      });
+      await user.save();
+    } else if (!user.googleId) {
+      user.googleId = profile.id;
+      await user.save();
+    }
+
+    // Pass DB-backed user to req.user
+    return done(null, user);
+  } catch (err) {
+    return done(err);
+  }
+}
+```
+
+7) Linking verification code to the DB-backed user
+
+- Current repo flow stores verification code in `req.session.doubleCheckCode` and uses `req.session.doubleChecked` — that is compatible with both raw profile and DB-backed users. After you upsert the DB user in the Passport callback, `req.user` will be the DB document and `routes/auth.js` will continue to work as-is.
+
+8) Summary of steps to enable in this repo
+
+1. Add `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`, `EMAIL_USER`, `EMAIL_PASS` to `backend/.env`.
+2. (Optional) Add `googleId` field to `backend/src/models/User.js` as shown above and run a small migration (or rely on the lean upsert logic to set it on first login).
+3. Update your Passport strategy to upsert/find user in DB, returning the DB `user` in `done(null, user)`.
+4. Start MongoDB, run `npm run seed` to add admin and sample data.
+5. Start backend and frontend. Visit the login page and use "Continue with Google".
+
+---
+
+Saved & committed: repository updated with this tailored section.
