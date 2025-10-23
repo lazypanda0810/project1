@@ -119,7 +119,7 @@ cd frontend && npm run check
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/lazypanda0810/chronos-style-shop-08.git
+git clone https://github.com/lazypanda0810/project1
 cd chronos-style-shop-08
 ```
 
