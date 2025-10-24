@@ -66,20 +66,89 @@ foreach($k in $oauthKeys){
   if(-not ($envMap.ContainsKey($k) -and $envMap[$k])){ Write-Warn "OAuth env missing: $k"; $oauthConfigured = $false }
 }
 if($oauthConfigured){ Write-Ok "OAuth envs appear configured" } else { Write-Warn "OAuth not fully configured" }
+Param(
+  [switch]$StartServers
+)
+
+function Write-Ok($s){ Write-Host "[OK]    $s" -ForegroundColor Green }
+function Write-Warn($s){ Write-Host "[WARN]  $s" -ForegroundColor Yellow }
+function Write-Err($s){ Write-Host "[ERROR] $s" -ForegroundColor Red }
+
+$RepoRoot = Resolve-Path . | Select-Object -ExpandProperty Path
+$BackendDir = Join-Path $RepoRoot 'backend'
+$FrontendDir = Join-Path $RepoRoot 'frontend'
+$LogsDir = Join-Path $RepoRoot 'scripts\logs'
+New-Item -Path $LogsDir -ItemType Directory -Force | Out-Null
+
+function Check-Cmd($cmd){
+  $c = Get-Command $cmd -ErrorAction SilentlyContinue
+  if($null -ne $c){ Write-Ok ("Command available: {0}" -f $cmd); return $true }
+  Write-Warn ("Command NOT found: {0}" -f $cmd)
+  return $false
+}
+
+function Read-EnvFile($path){
+  $map = @{}
+  if(Test-Path $path){
+    Get-Content $path | ForEach-Object {
+      if($_ -match '^\s*([^#=]+)=(.*)$'){
+        $k = $matches[1].Trim()
+        # Trim surrounding quotes and backticks if any
+        $v = $matches[2].Trim().Trim("'`\"")
+        $map[$k] = $v
+      }
+    }
+  }
+  return $map
+}
+
+Write-Host ("Repository root: {0}`n" -f $RepoRoot)
+
+# 1. Basic prerequisites
+Write-Host "Checking prerequisites..."
+Check-Cmd node | Out-Null
+Check-Cmd npm | Out-Null
+Check-Cmd git | Out-Null
+$hasMongosh = Check-Cmd mongosh
+$hasDocker = Check-Cmd docker
+
+# 2. Check key files
+Write-Host "`nChecking important files..."
+$files = @('GOOGLE_OAUTH_SETUP_DETAILED.md','DB_INSTALL_GUIDE.md','PLEASE_READ_NEXT_STEPS.md')
+foreach($f in $files){
+  $p = Join-Path $RepoRoot $f
+  if(Test-Path $p){ Write-Ok ("{0} present" -f $f) } else { Write-Warn ("{0} missing: {1}" -f $f, $p) }
+}
+
+# 3. Backend .env checks
+Write-Host "`nReading backend .env..."
+$backendEnvPath = Join-Path $BackendDir '.env'
+$envMap = Read-EnvFile $backendEnvPath
+$requiredBackendKeys = @('MONGODB_URI','SESSION_SECRET')
+foreach($k in $requiredBackendKeys){
+  if($envMap.ContainsKey($k) -and $envMap[$k]){ Write-Ok ("Env {0} ok" -f $k) } else { Write-Warn ("Env {0} missing or empty in backend/.env" -f $k) }
+}
+# OAuth keys (optional)
+$oauthKeys = @('GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_CALLBACK_URL')
+$oauthConfigured = $true
+foreach($k in $oauthKeys){
+  if(-not ($envMap.ContainsKey($k) -and $envMap[$k])){ Write-Warn ("OAuth env missing: {0}" -f $k); $oauthConfigured = $false }
+}
+if($oauthConfigured){ Write-Ok "OAuth envs appear configured" } else { Write-Warn "OAuth not fully configured" }
 
 # 4. Install deps if needed
 function Ensure-Install($dir){
   $nm = Join-Path $dir 'node_modules'
   if(-not (Test-Path $nm)){
-    Write-Host "Installing npm deps in $dir ..."
+    Write-Host ("Installing npm deps in {0} ..." -f $dir)
     Push-Location $dir
     npm install 2>&1 | Tee-Object -FilePath (Join-Path $LogsDir ("npm_install_" + (Split-Path $dir -Leaf) + ".log"))
     Pop-Location
-    Write-Ok "Installed deps in $dir"
+    Write-Ok ("Installed deps in {0}" -f $dir)
   } else { Write-Ok "node_modules present in $dir" }
 }
-if(Test-Path $BackendDir){ Ensure-Install $BackendDir } else { Write-Err "Backend folder not found: $BackendDir" }
-if(Test-Path $FrontendDir){ Ensure-Install $FrontendDir } else { Write-Err "Frontend folder not found: $FrontendDir" }
+if(Test-Path $BackendDir){ Ensure-Install $BackendDir } else { Write-Err ("Backend folder not found: {0}" -f $BackendDir) }
+if(Test-Path $FrontendDir){ Ensure-Install $FrontendDir } else { Write-Err ("Frontend folder not found: {0}" -f $FrontendDir) }
 
 # 5. Run frontend TypeScript check (if tsconfig exists)
 $tsconfig = Join-Path $FrontendDir 'tsconfig.json'
@@ -118,13 +187,13 @@ $backendProc = $null; $frontendProc = $null
 if($StartServers){
   Write-Host "`nStarting backend and frontend in new PowerShell windows..."
   if(Test-Path $BackendDir){
-    $backendProc = Start-Process -FilePath 'powershell' -ArgumentList "-NoExit","-Command","cd '$BackendDir'; npm run dev" -PassThru
-    Write-Ok "Started backend (PID $($backendProc.Id))"
+    $backendProc = Start-Process -FilePath 'powershell' -ArgumentList '-NoExit','-Command',"cd '$BackendDir'; npm run dev" -PassThru
+    Write-Ok ("Started backend (PID {0})" -f $backendProc.Id)
   }
   Start-Sleep -Seconds 2
   if(Test-Path $FrontendDir){
-    $frontendProc = Start-Process -FilePath 'powershell' -ArgumentList "-NoExit","-Command","cd '$FrontendDir'; npx vite --host 127.0.0.1 --port 5173 --strictPort" -PassThru
-    Write-Ok "Started frontend (PID $($frontendProc.Id))"
+    $frontendProc = Start-Process -FilePath 'powershell' -ArgumentList '-NoExit','-Command',"cd '$FrontendDir'; npx vite --host 127.0.0.1 --port 5173 --strictPort" -PassThru
+    Write-Ok ("Started frontend (PID {0})" -f $frontendProc.Id)
   }
   Write-Host "Waiting 6 seconds for servers to bind..."
   Start-Sleep -Seconds 6
@@ -144,11 +213,11 @@ foreach($c in $checks){
   try{
     $resp = Invoke-WebRequest -Uri $c.Url -UseBasicParsing -TimeoutSec 6 -ErrorAction Stop
     $ct = $resp.Content
-    Write-Ok "$($c.Name) => $($c.Url) responded (length $($ct.Length))"
-    $logFile = Join-Path $LogsDir ("probe_" + ($c.Name -replace '\s+','_') + ".log")
+    Write-Ok ("{0} => {1} responded (length {2})" -f $c.Name, $c.Url, $ct.Length)
+    $logFile = Join-Path $LogsDir ("probe_" + ($c.Name -replace '\\s+','_') + ".log")
     $ct | Out-File -FilePath $logFile -Encoding utf8
   } catch {
-    Write-Warn "$($c.Name) => $($c.Url) did NOT respond: $($_.Exception.Message)"
+    Write-Warn ("{0} => {1} did NOT respond: {2}" -f $c.Name, $c.Url, $_.Exception.Message)
   }
 }
 
@@ -162,7 +231,7 @@ Write-Host "`nGit status & recent commits..."
 if(Test-Path (Join-Path $RepoRoot '.git')) {
   git status --porcelain
   git log --oneline -n 5
-} else { Write-Warn "Not a git repo at $RepoRoot" }
+} else { Write-Warn ("Not a git repo at {0}" -f $RepoRoot) }
 
 # 12. Final suggestions based on checks
 Write-Host "`nFinal report / suggestions:"
