@@ -127,7 +127,7 @@ cd chronos-style-shop-08
 
 ```bash
 # Navigate to backend directory
-cd backend
+cd backendcd backend
 
 # Install dependencies
 npm install
